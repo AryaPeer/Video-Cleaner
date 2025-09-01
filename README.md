@@ -11,7 +11,6 @@ A video processing tool that cleans video and removes background noise from audi
 ## Requirements
 - OpenCV (4.0+)
 - FFmpeg libraries (libavcodec, libavformat, libavutil, libswresample)
-- CMake (3.10+)
 
 ## Installation
 
@@ -19,7 +18,7 @@ A video processing tool that cleans video and removes background noise from audi
 ```bash
 # Install build tools
 sudo apt-get update
-sudo apt-get install -y build-essential cmake pkg-config
+sudo apt-get install -y build-essential pkg-config
 
 # Install OpenCV
 sudo apt-get install -y libopencv-dev
@@ -32,7 +31,7 @@ sudo apt-get install -y libavcodec-dev libavformat-dev libavutil-dev libswresamp
 ```bash
 # Install build tools
 sudo pacman -Syu
-sudo pacman -S --needed base-devel cmake pkg-config
+sudo pacman -S --needed base-devel pkg-config
 
 # Install OpenCV
 sudo pacman -S opencv
@@ -43,11 +42,9 @@ sudo pacman -S ffmpeg
 
 ## Building
 ```bash
-mkdir build
-cd build
-cmake ..
-make
+./build.sh
 ```
+This will create a `build_bash` directory containing the `video_cleaner` and `face_extractor` executables.
 
 ## Usage
 
