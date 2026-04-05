@@ -4,7 +4,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <numeric>
-#include <cassert>
+#include <string>
 
 const double PI = 3.14159265358979323846;
 
@@ -45,10 +45,18 @@ void BandPassFilter::calculateCoefficients() {
         }
     }
 
-    float sum = std::accumulate(m_coefficients.begin(), m_coefficients.end(), 0.0f);
-    if (sum != 0) {
+    float centerFreq = (m_lowCutoff + m_highCutoff) / 2.0f;
+    float normalizedCenter = 2.0f * PI * centerFreq / m_sampleRate;
+    float gainReal = 0.0f;
+    float gainImag = 0.0f;
+    for (int i = 0; i <= filterOrder; i++) {
+        gainReal += m_coefficients[i] * cos(normalizedCenter * i);
+        gainImag -= m_coefficients[i] * sin(normalizedCenter * i);
+    }
+    float gainMag = std::sqrt(gainReal * gainReal + gainImag * gainImag);
+    if (gainMag > 0.0f) {
         for (auto& coef : m_coefficients) {
-            coef /= sum;
+            coef /= gainMag;
         }
     }
 }
@@ -73,8 +81,8 @@ std::vector<float> BandPassFilter::apply(const std::vector<float>& input) {
     return output;
 }
 
-SpectralSubtraction::SpectralSubtraction(int fftSize, int hopSize, float reductionFactor)
-    : m_fftSize(fftSize), m_hopSize(hopSize), m_reductionFactor(reductionFactor) {
+SpectralSubtraction::SpectralSubtraction(int sampleRate, int fftSize, int hopSize, float reductionFactor)
+    : m_sampleRate(sampleRate), m_fftSize(fftSize), m_hopSize(hopSize), m_reductionFactor(reductionFactor) {
 
     if (fftSize <= 0 || (fftSize & (fftSize - 1)) != 0) {
         throw std::invalid_argument("FFT size must be a positive power of 2");
@@ -173,7 +181,7 @@ std::vector<float> SpectralSubtraction::performIFFT(const std::vector<std::compl
 }
 
 std::vector<float> SpectralSubtraction::estimateNoiseProfile(const std::vector<float>& input, float durationSec) {
-    int samplesForEstimation = static_cast<int>(44100 * durationSec);
+    int samplesForEstimation = static_cast<int>(m_sampleRate * durationSec);
     samplesForEstimation = std::min(samplesForEstimation, static_cast<int>(input.size()));
 
     std::vector<float> noiseProfile(m_fftSize / 2 + 1, 0.0f);
@@ -207,9 +215,13 @@ std::vector<float> SpectralSubtraction::process(const std::vector<float>& input,
         noise = *noiseProfile;
     }
 
-    assert(noise.size() == static_cast<size_t>(m_fftSize / 2 + 1));
+    if (noise.size() != static_cast<size_t>(m_fftSize / 2 + 1)) {
+        throw std::runtime_error("Noise profile size mismatch: expected " +
+            std::to_string(m_fftSize / 2 + 1) + " but got " + std::to_string(noise.size()));
+    }
 
     std::vector<float> output(input.size(), 0.0f);
+    auto window = getWindowFunction(m_fftSize);
 
     for (size_t start = 0; start + m_fftSize <= input.size(); start += m_hopSize) {
         auto spectrum = performFFT(input, static_cast<int>(start), m_fftSize);
@@ -232,12 +244,15 @@ std::vector<float> SpectralSubtraction::process(const std::vector<float>& input,
 
         auto frame = performIFFT(spectrum);
 
-        auto window = getWindowFunction(m_fftSize);
         for (int i = 0; i < m_fftSize; i++) {
             if (start + i < output.size()) {
                 output[start + i] += frame[i] * window[i];
             }
         }
+    }
+
+    for (size_t i = 0; i < output.size(); i++) {
+        output[i] /= 1.5f;
     }
 
     return output;
@@ -250,7 +265,7 @@ AudioProcessor::AudioProcessor(int sampleRate, float lowCutoff, float highCutoff
 
     int fftSize = 2048;
     int hopSize = fftSize / 4;
-    m_spectralSubtraction = std::make_unique<SpectralSubtraction>(fftSize, hopSize, noiseReduction);
+    m_spectralSubtraction = std::make_unique<SpectralSubtraction>(sampleRate, fftSize, hopSize, noiseReduction);
 }
 
 std::vector<float> AudioProcessor::process(const std::vector<float>& input) {

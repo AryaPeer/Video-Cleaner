@@ -44,7 +44,7 @@ public:
      * @param hopSize Hop size between consecutive frames
      * @param reductionFactor Noise reduction factor (0-1)
      */
-    SpectralSubtraction(int fftSize, int hopSize, float reductionFactor);
+    SpectralSubtraction(int sampleRate, int fftSize, int hopSize, float reductionFactor);
 
     /**
      * Processes audio to remove noise
@@ -63,6 +63,7 @@ public:
     std::vector<float> estimateNoiseProfile(const std::vector<float>& input, float durationSec = 0.5);
 
 private:
+    int m_sampleRate;
     int m_fftSize;
     int m_hopSize;
     float m_reductionFactor;

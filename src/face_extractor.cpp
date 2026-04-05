@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 #include <filesystem>
+#include <sstream>
+#include <iomanip>
 #include <opencv2/opencv.hpp>
 #include <opencv2/objdetect.hpp>
 #include <opencv2/imgproc.hpp>
@@ -91,9 +93,10 @@ bool FaceExtractor::extractFaces(const std::string& videoPath, float timeInSecon
         cv::Mat faceROI = frame(faceRect);
 
         fs::path outputDirPath(outputDir);
-        std::string filename = "face_" +
-                             std::to_string(static_cast<int>(timeInSeconds)) + "s_" +
-                             std::to_string(i) + ".jpg";
+        std::ostringstream oss;
+        oss << "face_" << std::fixed << std::setprecision(2) << timeInSeconds
+            << "s_" << i << ".jpg";
+        std::string filename = oss.str();
         fs::path outputPath = outputDirPath / filename;
 
         if (!cv::imwrite(outputPath.string(), faceROI)) {
@@ -136,28 +139,40 @@ bool FaceExtractor::extractFacesFromRange(const std::string& videoPath, float st
 
     if (startTime < 0) startTime = 0;
     if (endTime > duration) endTime = duration;
-    if (startTime >= endTime && !(startTime == endTime && startTime == 0 && duration == 0)) {
-         if (startTime == endTime && duration > 0) {
-         } else {
-            std::cerr << "Error: Start time (" << startTime << ") must generally be less than end time (" << endTime << "). Video duration: " << duration << std::endl;
-            return false;
-         }
+    if (startTime > endTime) {
+        std::cerr << "Error: Start time (" << startTime << ") must be less than or equal to end time (" << endTime << "). Video duration: " << duration << std::endl;
+        return false;
     }
 
     bool all_successful = true;
-    for (float time = startTime; time <= endTime; time += interval) {
-        std::cout << "--- Processing timestamp: " << time << "s (Range: " << startTime << "-" << endTime << ", Interval: " << interval << ") ---" << std::endl;
-        if (!extractFaces(videoPath, time, outputDir)) {
+
+    if (startTime == endTime) {
+        std::cout << "--- Processing timestamp: " << startTime << "s ---" << std::endl;
+        if (!extractFaces(videoPath, startTime, outputDir)) {
             all_successful = false;
-            std::cerr << "Failed to extract faces at timestamp " << time << "s. Continuing with next interval." << std::endl;
+            std::cerr << "Failed to extract faces at timestamp " << startTime << "s." << std::endl;
         }
-        if (time == endTime) break;
-        if (time + interval > endTime && time < endTime) {
-             if (!extractFaces(videoPath, endTime, outputDir)) {
+    } else {
+        int numSteps = static_cast<int>((endTime - startTime) / interval);
+        float lastProcessedTime = -1.0f;
+
+        for (int step = 0; step <= numSteps; step++) {
+            float time = startTime + step * interval;
+            std::cout << "--- Processing timestamp: " << time << "s (Range: " << startTime << "-" << endTime << ", Interval: " << interval << ") ---" << std::endl;
+            if (!extractFaces(videoPath, time, outputDir)) {
                 all_successful = false;
-                std::cerr << "Failed to extract faces at end timestamp " << endTime << "s. Continuing with next interval." << std::endl;
-             }
-             break;
+                std::cerr << "Failed to extract faces at timestamp " << time << "s. Continuing with next interval." << std::endl;
+            }
+            lastProcessedTime = time;
+        }
+
+        float epsilon = interval * 0.01f;
+        if (lastProcessedTime < endTime - epsilon) {
+            std::cout << "--- Processing timestamp: " << endTime << "s (Range: " << startTime << "-" << endTime << ", Interval: " << interval << ") ---" << std::endl;
+            if (!extractFaces(videoPath, endTime, outputDir)) {
+                all_successful = false;
+                std::cerr << "Failed to extract faces at end timestamp " << endTime << "s." << std::endl;
+            }
         }
     }
 

@@ -37,6 +37,9 @@ private:
     float m_noiseReduction;
     float m_videoDenoiseStrength;
 
+    int m_lastFrameWidth = 0;
+    int m_lastFrameHeight = 0;
+
     std::unique_ptr<AudioProcessor> m_audioProcessor;
     std::unique_ptr<VideoDenoiser> m_videoDenoiser;
 

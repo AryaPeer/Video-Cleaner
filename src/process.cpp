@@ -4,9 +4,13 @@
 #include <vector>
 #include <memory>
 #include <stdexcept>
-#include <fstream> // For std::ofstream
-#include <string>  // For std::string manipulations for temp files
-#include <cstdio>  // For std::remove
+#include <fstream>
+#include <string>  
+#include <cstdio>  
+#include <cstdint> 
+#include <unistd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -161,6 +165,13 @@ bool VideoProcessor::extractAudio(const std::string& videoPath, std::vector<floa
 
     AVPacket packet;
     AVFrame* frame = av_frame_alloc();
+    if (!frame) {
+        std::cerr << "Failed to allocate AVFrame" << std::endl;
+        swr_free(&swrContext);
+        avcodec_free_context(&codecContext);
+        avformat_close_input(&formatContext);
+        return false;
+    }
     std::vector<std::vector<float>> channelData(channels);
 
     av_seek_frame(formatContext, audioStreamIndex, 0, AVSEEK_FLAG_BACKWARD);
@@ -172,7 +183,11 @@ bool VideoProcessor::extractAudio(const std::string& videoPath, std::vector<floa
                 while (avcodec_receive_frame(codecContext, frame) >= 0) {
                     uint8_t** output;
                     int out_samples = frame->nb_samples;
-                    av_samples_alloc_array_and_samples(&output, nullptr, channels, out_samples, AV_SAMPLE_FMT_FLTP, 0);
+                    int alloc_ret = av_samples_alloc_array_and_samples(&output, nullptr, channels, out_samples, AV_SAMPLE_FMT_FLTP, 0);
+                    if (alloc_ret < 0) {
+                        std::cerr << "Failed to allocate sample buffer" << std::endl;
+                        continue;
+                    }
 
                     out_samples = swr_convert(swrContext, output, out_samples,
                                           (const uint8_t**)frame->extended_data, frame->nb_samples);
@@ -266,13 +281,10 @@ bool VideoProcessor::processAudio(std::vector<float>& audioData, int sampleRate,
 }
 
 cv::Mat VideoProcessor::denoiseFrame(const cv::Mat& frame) {
-    static int width = 0;
-    static int height = 0;
-
-    if (width != frame.cols || height != frame.rows) {
-        width = frame.cols;
-        height = frame.rows;
-        m_videoDenoiser->initialize(width, height);
+    if (m_lastFrameWidth != frame.cols || m_lastFrameHeight != frame.rows) {
+        m_lastFrameWidth = frame.cols;
+        m_lastFrameHeight = frame.rows;
+        m_videoDenoiser->initialize(m_lastFrameWidth, m_lastFrameHeight);
     }
 
     return m_videoDenoiser->denoise(frame);
@@ -285,14 +297,20 @@ void VideoProcessor::applyAdditionalVideoEnhancements(cv::Mat& frame) {
 }
 
 void writeWavHeader(std::ofstream& file, int sampleRate, int numChannels, int numSamples, int bitsPerSample) {
+    int64_t dataSize = static_cast<int64_t>(numSamples) * numChannels * (bitsPerSample / 8);
+    if (dataSize > INT32_MAX - 36) {
+        std::cerr << "Warning: Audio data too large for standard WAV format. Output may be truncated." << std::endl;
+        dataSize = INT32_MAX - 36;
+    }
+
     file.write("RIFF", 4);
-    int32_t chunkSize = 36 + numSamples * numChannels * (bitsPerSample / 8);
+    int32_t chunkSize = static_cast<int32_t>(36 + dataSize);
     file.write(reinterpret_cast<const char*>(&chunkSize), 4);
     file.write("WAVE", 4);
     file.write("fmt ", 4);
     int32_t subchunk1Size = 16;
     file.write(reinterpret_cast<const char*>(&subchunk1Size), 4);
-    int16_t audioFormat = (bitsPerSample == 32 && numChannels > 0) ? 3 : 1;
+    int16_t audioFormat = (bitsPerSample == 32) ? 3 : 1;
     file.write(reinterpret_cast<const char*>(&audioFormat), 2);
     int16_t channels = static_cast<int16_t>(numChannels);
     file.write(reinterpret_cast<const char*>(&channels), 2);
@@ -305,7 +323,7 @@ void writeWavHeader(std::ofstream& file, int sampleRate, int numChannels, int nu
     int16_t bps = static_cast<int16_t>(bitsPerSample);
     file.write(reinterpret_cast<const char*>(&bps), 2);
     file.write("data", 4);
-    int32_t subchunk2Size = numSamples * numChannels * (bitsPerSample / 8);
+    int32_t subchunk2Size = static_cast<int32_t>(dataSize);
     file.write(reinterpret_cast<const char*>(&subchunk2Size), 4);
 }
 
@@ -340,6 +358,40 @@ bool VideoProcessor::saveProcessedAudioToWav(const std::string& wavPath, const s
     return true;
 }
 
+static int runFFmpegMux(const std::string& tempVideo, const std::string& tempAudio,
+                        const std::string& output, const std::string& logPath) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        std::cerr << "Failed to fork process for FFmpeg" << std::endl;
+        return -1;
+    }
+
+    if (pid == 0) {
+        int logFd = open(logPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (logFd >= 0) {
+            dup2(logFd, STDERR_FILENO);
+            close(logFd);
+        }
+
+        execlp("ffmpeg", "ffmpeg", "-y",
+               "-i", tempVideo.c_str(),
+               "-i", tempAudio.c_str(),
+               "-c:v", "copy", "-c:a", "aac",
+               "-strict", "experimental",
+               "-shortest", output.c_str(),
+               (char*)nullptr);
+
+        _exit(127);
+    }
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    return -1;
+}
+
 bool VideoProcessor::processVideoFrames(const std::string& inputPath, const std::string& outputPath,
                                       const std::vector<float>& processedAudio, int audioSampleRate, int audioChannels) {
     cv::VideoCapture inputVideo(inputPath);
@@ -352,6 +404,12 @@ bool VideoProcessor::processVideoFrames(const std::string& inputPath, const std:
     int height = static_cast<int>(inputVideo.get(cv::CAP_PROP_FRAME_HEIGHT));
     double fps = inputVideo.get(cv::CAP_PROP_FPS);
     int totalFrames = static_cast<int>(inputVideo.get(cv::CAP_PROP_FRAME_COUNT));
+
+    if (fps <= 0) {
+        std::cerr << "Error: Invalid FPS (" << fps << ") from input video." << std::endl;
+        inputVideo.release();
+        return false;
+    }
 
     std::string finalOutputPath = outputPath;
     std::string tempVideoFile = finalOutputPath + ".tmp_vid.mp4";
@@ -377,7 +435,7 @@ bool VideoProcessor::processVideoFrames(const std::string& inputPath, const std:
         outputVideo.write(denoisedFrame);
 
         frameCount++;
-        if (frameCount % 100 == 0 || frameCount == totalFrames) {
+        if (totalFrames > 0 && (frameCount % 100 == 0 || frameCount == totalFrames)) {
             std::cout << "Processed " << frameCount << "/" << totalFrames << " frames ("
                       << (100.0 * frameCount / totalFrames) << "%)" << std::endl;
         }
@@ -392,27 +450,26 @@ bool VideoProcessor::processVideoFrames(const std::string& inputPath, const std:
         return false;
     }
 
-    std::string ffmpeg_cmd = "ffmpeg -y -i \"" + tempVideoFile +
-                             "\" -i \"" + tempAudioPath +
-                             "\" -c:v copy -c:a aac -strict experimental -shortest \"" +
-                             finalOutputPath + "\" 2> ffmpeg_mux_log.txt";
-
-    std::cout << "Executing FFmpeg command: " << ffmpeg_cmd << std::endl;
-    int ret = system(ffmpeg_cmd.c_str());
+    std::string logPath = finalOutputPath + ".ffmpeg_log.txt";
+    std::cout << "Muxing audio and video with FFmpeg..." << std::endl;
+    int ret = runFFmpegMux(tempVideoFile, tempAudioPath, finalOutputPath, logPath);
 
     if (ret == 0) {
         std::cout << "Muxing successful. Final output: " << finalOutputPath << std::endl;
+
+        if (std::remove(tempVideoFile.c_str()) != 0) {
+            std::perror(("Error deleting temporary video file: " + tempVideoFile).c_str());
+        }
+        if (std::remove(tempAudioPath.c_str()) != 0) {
+            std::perror(("Error deleting temporary audio file: " + tempAudioPath).c_str());
+        }
     } else {
         std::cerr << "FFmpeg muxing failed. Return code: " << ret << std::endl;
-        std::cerr << "Check ffmpeg_mux_log.txt for details." << std::endl;
+        std::cerr << "Check " << logPath << " for details." << std::endl;
+        std::cerr << "Temporary files preserved for debugging:" << std::endl;
+        std::cerr << "  Video: " << tempVideoFile << std::endl;
+        std::cerr << "  Audio: " << tempAudioPath << std::endl;
         return false;
-    }
-
-    if (std::remove(tempVideoFile.c_str()) != 0) {
-        std::perror(("Error deleting temporary video file: " + tempVideoFile).c_str());
-    }
-    if (std::remove(tempAudioPath.c_str()) != 0) {
-        std::perror(("Error deleting temporary audio file: " + tempAudioPath).c_str());
     }
 
     return true;
